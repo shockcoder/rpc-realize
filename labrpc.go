@@ -151,8 +151,8 @@ func (rn *Network) ProcessReq(req reqMsg) {
 			ech <- r
 		}()
 
-		//等待处理器的返回
-		//当DeleteServer()函数被执行时， 停止等待并返回一个错误
+		// 等待处理器的返回
+		// 当DeleteServer()函数被执行时， 停止等待并返回一个错误
 		var reply replyMsg
 		replyOK := false
 		serverDead := false
@@ -164,7 +164,66 @@ func (rn *Network) ProcessReq(req reqMsg) {
 				serverDead = rn.IsServerDead(req.endname, servername, server)
 			}
 		}
+
+		// 当DeleteServer()被执行，即服务器被杀死, 不用回复客户端请求
+		// 这是为了避免客户端对Append的肯定回复的情况
+		// 但是服务器将更新持久保存的保存到旧的Persister中.在执行DeleteServer()之前请慎重考虑
+		serverDead = rn.IsServerDead(req.endname, servername, server)
+
+		if replyOK == false || serverDead == true {
+			// server was killed while we were waiting
+			req.replyCh <- replyMsg{false, nil}
+		} else if reliable == false && (rand.Int()%1000 < 100) {
+			// 响应超时，放弃回复
+			req.replyCh <- replyMsg{false, nil}
+		} else if longrecordering == true && rand.Intn(900) < 600 {
+			// 延长一点响应时间
+			ms := 200 + rand.Intn(1+rand.Intn(2000))
+			time.Sleep(time.Duration(ms) * time.Millisecond)
+			req.replyCh <- reply
+		} else {
+			req.replyCh <- reply
+		}
+	} else {
+		// 模拟没有回复 和 超时
+		ms := 0
+		if rn.longDelays {
+			ms = rand.Int() % 7000
+		} else {
+			//模拟请求快速响应
+			ms = rand.Int() % 100
+		}
+		time.Sleep(time.Duration(ms) * time.Millisecond)
+		req.replyCh <- replyMsg{false, nil}
 	}
+}
+
+// 创建一个客户端
+// 开启线程来 监听和传递
+func (rn *Network) MakeEnd(endname interface{}) *ClientEnd {
+	rn.mu.Lock()
+	defer rn.mu.Unlock()
+
+	if _, ok := rn.ends[endname]; ok {
+		log.Fatalf("MakeEnd: %v already exists\n", endname)
+	}
+
+	e := &ClientEnd{
+		endname: endname,
+		ch:      rn.endCh,
+	}
+	rn.ends[endname] = e
+	rn.enabled[endname] = false
+	rn.connections[endname] = nil
+
+	return e
+}
+
+func (rn *Network) AddServer(servername interface{}, rs *Server) {
+	rn.mu.Lock()
+	defer rn.mu.Unlock()
+
+	rn.servers[servername] = rs
 }
 
 // server 是一个servers的组成，所有的server拥有同样的 rpc适配器
