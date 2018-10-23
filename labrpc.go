@@ -1,4 +1,4 @@
-package rpc_realize
+package labrpc
 
 import (
 	"bytes"
@@ -78,6 +78,8 @@ type Network struct {
 	endCh           chan reqMsg
 }
 
+// 模拟一个网络
+// 该网络包含客户端和服务端
 func MakeNetWork() *Network {
 
 	endCh := make(chan reqMsg)
@@ -219,8 +221,7 @@ func (rn *Network) ProcessReq(req reqMsg) {
 	}
 }
 
-// 创建一个客户端
-// 开启线程来 监听和传递
+// 为该网络创建一个客户端
 func (rn *Network) MakeEnd(endname interface{}) *ClientEnd {
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
