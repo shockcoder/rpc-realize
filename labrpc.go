@@ -69,7 +69,7 @@ func (e *ClientEnd) Call(svcMeth string, args interface{}, reply interface{}) bo
 type Network struct {
 	mu              sync.Mutex
 	reliable        bool
-	longDelays      bool                        //连接不可达的终止时间
+	longDelays      bool                        //连接不可达时,停顿一段时间
 	longRecordering bool                        //延迟回复的时间
 	ends            map[interface{}]*ClientEnd  //客户端的 map集合 key: name of ClientEnd
 	enabled         map[interface{}]bool        //by end name
@@ -99,6 +99,27 @@ func MakeNetWork() *Network {
 	}()
 
 	return rn
+}
+
+func (rn *Network) Reliable(yes bool) {
+	rn.mu.Lock()
+	defer rn.mu.Unlock()
+
+	rn.reliable = yes
+}
+
+func (rn *Network) LongRecording(yes bool) {
+	rn.mu.Lock()
+	defer rn.mu.Unlock()
+
+	rn.longRecordering = yes
+}
+
+func (rn *Network) LongDelays(yes bool) {
+	rn.mu.Lock()
+	defer rn.mu.Unlock()
+
+	rn.longDelays = yes
 }
 
 func (rn *Network) ReadEndnameInfo(endname interface{}) (enabled bool, servername interface{},
@@ -226,12 +247,63 @@ func (rn *Network) AddServer(servername interface{}, rs *Server) {
 	rn.servers[servername] = rs
 }
 
+func (rn *Network) DeleteServer(servername interface{}) {
+	rn.mu.Lock()
+	defer rn.mu.Unlock()
+
+	rn.servers[servername] = nil
+}
+
+// 将一个客户端连接到 server
+// 在客户端的生命周期内 只能连接一次
+func (rn *Network) Connect(endname interface{}, servername interface{}) {
+	rn.mu.Lock()
+	defer rn.mu.Unlock()
+
+	rn.connections[endname] = servername
+}
+
+// enable/disable a ClientEnd.
+func (rn *Network) Enable(endname interface{}, enabled bool) {
+	rn.mu.Lock()
+	defer rn.mu.Unlock()
+
+	rn.enabled[endname] = enabled
+}
+
+// 获取连接server的rpcs 的数量
+func (rn *Network) GetCount(servername interface{}) int {
+	rn.mu.Lock()
+	defer rn.mu.Unlock()
+
+	svr := rn.servers[servername]
+	return svr.GetCount()
+}
+
 // server 是一个servers的组成，所有的server拥有同样的 rpc适配器
 // 因此 例如  Raft和 k/v server 都可以监听相同的rpc 客户端
 type Server struct {
 	mu       sync.Mutex
 	services map[string]*Service
 	count    int //连接的 RPCs
+}
+
+func MakeServer() *Server {
+	rs := &Server{}
+	rs.services = map[string]*Service{}
+	return rs
+}
+
+func (rs *Server) AddService(svc *Service) {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	rs.services[svc.name] = svc
+}
+
+func (rs *Server) GetCount() int {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	return rs.count
 }
 
 func (rs *Server) dispatch(req reqMsg) replyMsg {
@@ -270,13 +342,35 @@ type Service struct {
 	methods map[string]reflect.Method // 函数类型
 }
 
+func MakeService(rcvr interface{}) *Service {
+	svc := &Service{}
+	svc.typ = reflect.TypeOf(rcvr)
+	svc.rcvr = reflect.ValueOf(rcvr)
+	svc.name = reflect.Indirect(svc.rcvr).Type().Name()
+	svc.methods = map[string]reflect.Method{}
+
+	for m := 0; m < svc.typ.NumMethod(); m++ {
+		method := svc.typ.Method(m)
+		mtype := method.Type
+		mname := method.Name
+
+		if method.PkgPath != "" || mtype.NumIn() != 3 || mtype.In(2).Kind() != reflect.Ptr || mtype.NumOut() != 0 {
+			// bad method  not for a handler
+		} else {
+			svc.methods[mname] = method
+		}
+	}
+
+	return svc
+}
+
 func (svc *Service) dispatch(methname string, req reqMsg) replyMsg {
 	if method, ok := svc.methods[methname]; ok {
 		// 读取参数
 		// type 是一个 req.argsType的指针
 		args := reflect.New(req.argsType)
 
-		// 对参数进行解码
+		// 对参数进行反序列化
 		buff := bytes.NewBuffer(req.args)
 		decoder := gob.NewDecoder(buff)
 		decoder.Decode(args.Interface())
