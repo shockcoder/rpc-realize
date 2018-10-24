@@ -126,3 +126,176 @@ func TestTypes(t *testing.T) {
 		}
 	}
 }
+
+// rn.Enable(endname, false) really disconnect a client
+func TestDisconnect(t *testing.T) {
+	runtime.GOMAXPROCS(4)
+
+	rn := MakeNetWork()
+
+	e := rn.MakeEnd("end1-99")
+
+	js := &JunkServer{}
+	svc := MakeService(js)
+
+	rs := MakeServer()
+	rs.AddService(svc)
+	rn.AddServer("server99", rs)
+
+	rn.Connect("end1-99", "server99")
+	{
+		reply := ""
+		e.Call("JunkServer.Handler2", 111, &reply)
+		if reply != "" {
+			t.Fatalf("unexpected reply from Handler2")
+		}
+	}
+
+	rn.Enable("end1-99", true)
+
+	{
+		reply := 0
+		e.Call("JunkServer.Handler1", "9099", &reply)
+		if reply != 9099 {
+			t.Fatalf("wrong reply from Handler1")
+		}
+	}
+}
+
+// test net.GetCount()
+func TestCount(t *testing.T) {
+	runtime.GOMAXPROCS(4)
+
+	rn := MakeNetWork()
+
+	e := rn.MakeEnd("end1-99")
+
+	js := &JunkServer{}
+	svc := MakeService(js)
+
+	rs := MakeServer()
+	rs.AddService(svc)
+	rn.AddServer(99, rs)
+
+	rn.Connect("end1-99", 99)
+	rn.Enable("end1-99", true)
+
+	for i := 0; i < 17; i++ {
+		reply := ""
+		e.Call("JunkServer.Handler2", i, &reply)
+		wanted := "handler2-" + strconv.Itoa(i)
+		if wanted != reply {
+			t.Fatalf("wrong reply %v from Handler1, expecting %v", reply, wanted)
+		}
+	}
+
+	n := rn.GetCount(99)
+	if n != 17 {
+		t.Fatalf("wrong GetCount() %v, expected 17\n", n)
+	}
+}
+
+// test RPCs from concurrent ClientEnds
+func TestConcurrentMany(t *testing.T) {
+	runtime.GOMAXPROCS(4)
+
+	rn := MakeNetWork()
+
+	js := &JunkServer{}
+	svc := MakeService(js)
+
+	rs := MakeServer()
+	rs.AddService(svc)
+	rn.AddServer(1000, rs)
+
+	ch := make(chan int)
+
+	nclients := 20
+	nrpcs := 10
+	for i := 0; i < nclients; i++ {
+		go func(i int) {
+			n := 0
+			defer func() { ch <- n }()
+
+			e := rn.MakeEnd(i)
+			rn.Connect(i, 1000)
+			rn.Enable(i, true)
+
+			for j := 0; j < nrpcs; j++ {
+				arg := i*100 + j
+				reply := ""
+				e.Call("JunkServer.Handler2", arg, &reply)
+				wanted := "handler2-" + strconv.Itoa(arg)
+				if reply != wanted {
+					t.Fatalf("wrong reply %v from Handler2, expecting %v", reply, wanted)
+				}
+				n += 1
+			}
+		}(i)
+	}
+
+	total := 0
+	for i := 0; i < nclients; i++ {
+		x := <-ch
+		total += x
+	}
+
+	if total != nclients*nrpcs {
+		t.Fatalf("wrong number of RPCs completed, got %v, expected %v", total, nclients*nrpcs)
+	}
+
+	n := rn.GetCount(1000)
+	if n != total {
+		t.Fatalf("wrong GetCount() %v, expected %v\n", n, total)
+	}
+}
+
+// test unreliable
+func TestUnreliable(t *testing.T) {
+	runtime.GOMAXPROCS(4)
+
+	rn := MakeNetWork()
+	rn.Reliable(false)
+
+	js := &JunkServer{}
+	svc := MakeService(js)
+
+	rs := MakeServer()
+	rs.AddService(svc)
+	rn.AddServer(1000, rs)
+
+	ch := make(chan int)
+
+	nclients := 300
+	for i := 0; i < nclients; i++ {
+		go func(i int) {
+			n := 0
+			defer func() { ch <- n }()
+
+			e := rn.MakeEnd(i)
+			rn.Connect(i, 1000)
+			rn.Enable(i, true)
+
+			arg := i * 100
+			reply := ""
+			ok := e.Call("JunkServer.Handler2", arg, &reply)
+			if ok {
+				wanted := "handler2-" + strconv.Itoa(arg)
+				if reply != wanted {
+					t.Fatalf("wrong reply %v from Handler2, expecting %v", reply, wanted)
+				}
+				n += 1
+			}
+		}(i)
+	}
+
+	total := 0
+	for i := 0; i < nclients; i++ {
+		x := <-ch
+		total += x
+	}
+
+	if total == nclients || total == 0 {
+		t.Fatalf("all RPCs succeeded despite unreliable")
+	}
+}
