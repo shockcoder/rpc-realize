@@ -346,16 +346,17 @@ type Service struct {
 // MakeService 通过反射获取传入的 rcvr的字段、方法
 func MakeService(rcvr interface{}) *Service {
 	svc := &Service{}
-	svc.typ = reflect.TypeOf(rcvr)
-	svc.rcvr = reflect.ValueOf(rcvr)
-	svc.name = reflect.Indirect(svc.rcvr).Type().Name()
+	svc.typ = reflect.TypeOf(rcvr)                      // reflect.Type
+	svc.rcvr = reflect.ValueOf(rcvr)                    // reflect.Value
+	svc.name = reflect.Indirect(svc.rcvr).Type().Name() // 返回svc.rcvr持有的指向的值 的Value的类型名
 	svc.methods = map[string]reflect.Method{}
 
-	for m := 0; m < svc.typ.NumMethod(); m++ {
-		method := svc.typ.Method(m)
-		mtype := method.Type
-		mname := method.Name
+	for m := 0; m < svc.typ.NumMethod(); m++ { // NumMethod() 返回该类型的方法的数目
+		method := svc.typ.Method(m) // 返回第m 个方法
+		mtype := method.Type        // 方法类型
+		mname := method.Name        // 方法名
 
+		// PlgPath 类型的包路径 NumIn 返回func类型的参数个数 In(i)返回func类型的第i个参数的类型(Type) NumOut() 返回func类型的返回值个数
 		if method.PkgPath != "" || mtype.NumIn() != 3 || mtype.In(2).Kind() != reflect.Ptr || mtype.NumOut() != 0 {
 			// bad method  not for a handler
 		} else {
@@ -379,15 +380,15 @@ func (svc *Service) dispatch(methname string, req reqMsg) replyMsg {
 		decoder.Decode(args.Interface())
 
 		//为reply申请内存空间
-		replyType := method.Type.In(2)
-		replyType = replyType.Elem()
-		replyv := reflect.New(replyType)
+		replyType := method.Type.In(2)   // 返回该method 的第2个参数的类型 Type
+		replyType = replyType.Elem()     // 返回该Type的具体元素类型
+		replyv := reflect.New(replyType) // 返回Value类型值，该值持有指向replyType的新申请的指针
 
 		// 执行函数
 		function := method.Func
-		function.Call([]reflect.Value{svc.rcvr, args.Elem(), replyv})
+		function.Call([]reflect.Value{svc.rcvr, args.Elem(), replyv}) // Call([]Value) 反射执行函数
 
-		// 对reply进行编码
+		// 对reply进行反序列
 		buf := new(bytes.Buffer)
 		encoder := gob.NewEncoder(buf)
 		encoder.EncodeValue(replyv)
