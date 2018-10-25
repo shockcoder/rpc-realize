@@ -343,6 +343,7 @@ type Service struct {
 	methods map[string]reflect.Method // 函数类型
 }
 
+// MakeService 通过反射获取传入的 rcvr的字段、方法
 func MakeService(rcvr interface{}) *Service {
 	svc := &Service{}
 	svc.typ = reflect.TypeOf(rcvr)
@@ -365,6 +366,7 @@ func MakeService(rcvr interface{}) *Service {
 	return svc
 }
 
+// dispatch 通过反射执行Call("method", arg, &reply) 传入的方法
 func (svc *Service) dispatch(methname string, req reqMsg) replyMsg {
 	if method, ok := svc.methods[methname]; ok {
 		// 读取参数
