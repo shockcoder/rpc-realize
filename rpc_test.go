@@ -1,6 +1,7 @@
 package labrpc
 
 import (
+	"fmt"
 	"runtime"
 	"strconv"
 	"sync"
@@ -298,4 +299,206 @@ func TestUnreliable(t *testing.T) {
 	if total == nclients || total == 0 {
 		t.Fatalf("all RPCs succeeded despite unreliable")
 	}
+}
+
+//test concurrent RPCs from  a single ClientEnd
+func TestConcurrentOne(t *testing.T) {
+	runtime.GOMAXPROCS(4)
+
+	rn := MakeNetWork()
+
+	js := &JunkServer{}
+	svc := MakeService(js)
+
+	rs := MakeServer()
+	rs.AddService(svc)
+	rn.AddServer(1000, rs)
+
+	e := rn.MakeEnd("c")
+	rn.Connect("c", 1000)
+	rn.Enable("c", true)
+
+	ch := make(chan int)
+
+	nrpcs := 20
+	for i := 0; i < nrpcs; i++ {
+		go func(i int) {
+			n := 0
+			defer func() { ch <- n }()
+
+			arg := 100 + i
+			reply := ""
+			e.Call("JunkServer.Handler2", arg, &reply)
+			wanted := "handler2-" + strconv.Itoa(arg)
+			if reply != wanted {
+				t.Fatalf("wrong reply %v from Handler2, expecting %v", reply, wanted)
+			}
+			n += 1
+		}(i)
+	}
+
+	total := 0
+	for i := 0; i < nrpcs; i++ {
+		x := <-ch
+		total += x
+	}
+
+	if total != nrpcs {
+		t.Fatalf("wrong number of RPCs completed, got %v, expected %v", total, nrpcs)
+	}
+
+	js.mu.Lock()
+	defer js.mu.Unlock()
+	if len(js.log2) != nrpcs {
+		t.Fatalf("wrong number of RPCs delivered")
+	}
+
+	n := rn.GetCount(1000)
+	if n != total {
+		t.Fatalf("wrong GetCount() %v, expected %v\n", n, total)
+	}
+}
+
+// 当Enabled = false， RPC应该延迟响应
+// 对于后来的 Enabled = true 的RPC则正常处理
+func TestRegreesion1(t *testing.T) {
+	runtime.GOMAXPROCS(4)
+
+	rn := MakeNetWork()
+
+	js := &JunkServer{}
+	svc := MakeService(js)
+
+	rs := MakeServer()
+	rs.AddService(svc)
+	rn.AddServer(1000, rs)
+
+	e := rn.MakeEnd("c")
+	rn.Connect("c", 1000)
+
+	//start some RPCs while the Client is disabled
+	//they will be delayed
+	rn.Enable("c", false)
+	ch := make(chan bool)
+	nrpcs := 20
+	for i := 0; i < nrpcs; i++ {
+		go func(i int) {
+			ok := false
+			defer func() { ch <- ok }()
+			arg := 100 + i
+			reply := ""
+			// this call would return false
+			e.Call("JunkServer.Handler2", arg, &reply)
+			ok = true
+		}(i)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	// enable the ClientEnd and check that an RPC completes quickly.
+	t0 := time.Now()
+	rn.Enable("c", true)
+	{
+		arg := 99
+		reply := ""
+		e.Call("JunkServer.Handler2", arg, &reply)
+		wanted := "handler2-" + strconv.Itoa(arg)
+		if reply != wanted {
+			t.Fatalf("wrong reply %v from Handler2, expecting %v", reply, wanted)
+		}
+	}
+	dur := time.Since(t0).Seconds()
+
+	if dur > 0.03 {
+		t.Fatalf("RPC took too long (%v) after Enable", dur)
+	}
+
+	for i := 0; i < nrpcs; i++ {
+		<-ch
+	}
+
+	js.mu.Lock()
+	defer js.mu.Unlock()
+	if len(js.log2) != 1 {
+		t.Fatalf("wrong number (%v) of RPCs delivered, expected 1", len(js.log2))
+	}
+
+	n := rn.GetCount(1000)
+	if n != 1 {
+		t.Fatalf("wrong GetCount() %v, expected %v\n", n, 1)
+	}
+}
+
+func TestKilled(t *testing.T) {
+	runtime.GOMAXPROCS(4)
+
+	rn := MakeNetWork()
+
+	e := rn.MakeEnd("end1-99")
+
+	js := &JunkServer{}
+	svc := MakeService(js)
+
+	rs := MakeServer()
+	rs.AddService(svc)
+	rn.AddServer("server99", rs)
+
+	rn.Connect("end1-99", "server99")
+	rn.Enable("end1-99", true)
+
+	doneCh := make(chan bool)
+	go func() {
+		reply := 0
+		ok := e.Call("JunkServer.Handler3", 99, &reply)
+		doneCh <- ok
+	}()
+
+	time.Sleep(1000 * time.Millisecond)
+
+	select {
+	case <-doneCh:
+		t.Fatalf("Handler3 should not have returned yet")
+	case <-time.After(100 * time.Millisecond):
+
+	}
+
+	rn.DeleteServer("server99")
+
+	select {
+	case x := <-doneCh:
+		if x != false {
+			t.Fatalf("Handler3 returned successfully despite DeleteServer()")
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatalf("Handler3 should return after DeleteServer()")
+	}
+}
+
+func TestBenchmark(t *testing.T) {
+	runtime.GOMAXPROCS(4)
+
+	rn := MakeNetWork()
+
+	e := rn.MakeEnd("end1-99")
+
+	js := &JunkServer{}
+	svc := MakeService(js)
+
+	rs := MakeServer()
+	rs.AddService(svc)
+	rn.AddServer("server99", rs)
+
+	rn.Connect("end1-99", "server99")
+	rn.Enable("end1-99", true)
+
+	t0 := time.Now()
+	n := 100000
+	for iters := 0; iters < n; iters++ {
+		reply := ""
+		e.Call("JunkServer.Handler2", 111, &reply)
+		if reply != "handler2-111" {
+			t.Fatalf("wrong reply from Handler2")
+		}
+	}
+	fmt.Printf("%v for %v\n", time.Since(t0), n)
 }
